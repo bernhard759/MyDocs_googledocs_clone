@@ -16,10 +16,15 @@ import {
   collection,
   onSnapshot,
   deleteDoc,
+  query,
+  where,
   doc,
 } from "firebase/firestore";
+import { auth } from "../firebaseConfig";
 import { useNavigate } from "react-router-dom";
+import { useAuthState } from "react-firebase-hooks/auth";
 import ModalComponent from "./Modal";
+import slugify from "slugify";
 
 export default function Docs({ database }) {
   // State
@@ -27,6 +32,10 @@ export default function Docs({ database }) {
   const [title, setTitle] = useState("");
   const [docsData, setDocsData] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  // User
+  const [user] = useAuthState(auth);
+  console.log(user);
 
   // Router nav
   let navigate = useNavigate();
@@ -42,9 +51,14 @@ export default function Docs({ database }) {
       return;
     }
 
+    const slug = slugify(title, { lower: true });
+
     // Proceed to add the document to Firestore
     addDoc(collectionRef, {
-      title: title.trim(), // Trim any extra spaces
+      title: title.trim(),
+      ownerId: user.uid,
+      sharedWith: [],
+      slug,
       docsDesc: "",
     })
       .then(() => {
@@ -58,24 +72,52 @@ export default function Docs({ database }) {
 
   // Get data
   const getData = () => {
-    // Set up listener
-    const unsubscribe = onSnapshot(collectionRef, (data) => {
-      setDocsData(
-        data.docs.map((doc) => ({
+    // Query 1: Fetch documents where the user is the owner
+    const ownerQuery = query(collectionRef, where("ownerId", "==", user.uid));
+
+    // Query 2: Fetch documents where the user is a collaborator
+    const collaboratorQuery = query(
+      collectionRef,
+      where("sharedWith", "array-contains", user.uid)
+    );
+
+    // Listen to the owner query
+    const unsubscribeOwner = onSnapshot(ownerQuery, (ownerSnapshot) => {
+      const ownerDocs = ownerSnapshot.docs.map((doc) => ({
+        ...doc.data(),
+        id: doc.id,
+      }));
+
+      // Combine with previous state (e.g., documents from collaborator query)
+      setDocsData((prevDocs) => [...prevDocs, ...ownerDocs]);
+      setLoading(false);
+    });
+
+    // Listen to the collaborator query
+    const unsubscribeCollaborator = onSnapshot(
+      collaboratorQuery,
+      (collaboratorSnapshot) => {
+        const collaboratorDocs = collaboratorSnapshot.docs.map((doc) => ({
           ...doc.data(),
           id: doc.id,
-        }))
-      );
-      setLoading(false); // Set loading to false once data is fetched
-    });
-    // Return the unsubscribe function to clean up the listener on unmount
-    return unsubscribe;
+        }));
+
+        setDocsData((prevDocs) => [...prevDocs, ...collaboratorDocs]);
+        setLoading(false);
+      }
+    );
+
+    // Return a function to unsubscribe both listeners
+    return () => {
+      unsubscribeOwner();
+      unsubscribeCollaborator();
+    };
   };
 
   const handleDelete = (id, event) => {
     console.log("delete", id, event);
     event.stopPropagation(); // Prevent the click event from propagating to the parent element
-    const documentRef = doc(collectionRef, id); // Create referenc to the document
+    const documentRef = doc(collectionRef, id); // Create reference to the document
     // Delete the document using its reference
     deleteDoc(documentRef)
       .then(() => {
@@ -98,8 +140,8 @@ export default function Docs({ database }) {
   }, []);
 
   // Handle click
-  const handleDocumentClick = (id) => {
-    navigate(`/editDocs/${id}`);
+  const handleDocumentClick = (slug, docId) => {
+    navigate(`/editDocs/${slug}-${docId}`); // Navigate using the slug
   };
 
   // Markup
@@ -122,6 +164,7 @@ export default function Docs({ database }) {
         addData={addData}
       />
 
+      <h3>My documents</h3>
       <Grid container spacing={3}>
         {loading
           ? Array.from(new Array(8)).map((_, index) => (
@@ -132,24 +175,31 @@ export default function Docs({ database }) {
           : docsData.map((doc) => (
               <Grid item xs={12} sm={6} md={4} lg={3} key={doc.id}>
                 <Card
-                  onClick={() => handleDocumentClick(doc.id)}
+                  variant="outlined"
+                  onClick={() => handleDocumentClick(doc.slug, doc.id)}
                   sx={{
                     cursor: "pointer",
-                    height: "100%",
                     position: "relative",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 300,
+                    aspectRatio: "2/1",
                   }}
                 >
-                  <IconButton
-                    aria-label="delete"
-                    onClick={(event) => handleDelete(doc.id, event)}
-                    sx={{
-                      position: "absolute",
-                      top: 8,
-                      right: 8,
-                    }}
-                  >
-                    <DeleteIcon />
-                  </IconButton>
+                  {doc.ownerId === user.uid && (
+                    <IconButton
+                      aria-label="delete"
+                      onClick={(event) => handleDelete(doc.id, event)}
+                      sx={{
+                        position: "absolute",
+                        top: 8,
+                        right: 8,
+                      }}
+                    >
+                      <DeleteIcon />
+                    </IconButton>
+                  )}
                   <CardContent>
                     <Typography variant="h6" component="div">
                       {doc.title}
